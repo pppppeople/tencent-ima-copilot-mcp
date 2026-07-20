@@ -147,7 +147,7 @@ async def _ask_with_target_kb(question: str, knowledge_base_id: str) -> list[Tex
         if not response:
             error_msgs = [msg.content for msg in messages if msg.type == 'system']
             if error_msgs:
-                response = f"[ERROR] {'; '.join(error_msgs)}"
+                response = "[ERROR] IMA 未返回可用的知识库文本，请换一个更贴近知识库内容的问题"
                 logger.warning(
                     "⚠️ 未提取到文本，返回系统错误",
                     error_count=len(error_msgs),
