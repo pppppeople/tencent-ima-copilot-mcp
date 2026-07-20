@@ -30,7 +30,7 @@ from tenacity import (
     before_sleep_log,
 )
 
-from models import (
+from .models import (
     IMAConfig,
     IMAMessage,
     MessageType,

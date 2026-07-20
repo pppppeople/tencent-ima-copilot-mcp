@@ -6,24 +6,23 @@ IMA Copilot MCP 服务器 - 基于环境变量的简化版本
 
 import sys
 import asyncio
-from pathlib import Path
+import os
 from datetime import datetime
+from pathlib import Path
 
 from fastmcp import FastMCP
 from mcp.types import TextContent
 from loguru import logger
 
-# 导入我们的模块
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
-from config import config_manager, get_config, get_app_config
-from ima_client import IMAAPIClient
+from src.config import config_manager, get_config, get_app_config
+from src.ima_client import IMAAPIClient
 
 # 配置详细的调试日志
 app_config = get_app_config()
 
 # 创建日志目录
-log_dir = Path("logs/debug")
+runtime_dir = Path(os.environ.get("IMA_RUNTIME_DIR", Path.home() / ".claude/ima")).expanduser()
+log_dir = runtime_dir / "logs/debug"
 log_dir.mkdir(parents=True, exist_ok=True)
 
 # 生成带时间戳的日志文件
@@ -433,9 +432,7 @@ def main():
     print(f"[INFO] 可用知识库: {', '.join(config.knowledge_base_ids)}")
 
     print("=" * 50)
-    print("启动命令:")
-    print(f"fastmcp run ima_server_simple.py:mcp --transport http --host {app_config.host} --port {app_config.port}")
-    print("=" * 50)
+    mcp.run(transport="http", host=app_config.host, port=app_config.port)
 
 
 if __name__ == "__main__":
