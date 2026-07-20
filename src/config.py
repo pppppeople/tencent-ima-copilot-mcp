@@ -1,6 +1,7 @@
 """
 配置管理系统 - 基于环境变量的简化版本
 """
+import os
 import uuid
 import base64
 import secrets
@@ -11,7 +12,7 @@ from loguru import logger
 from pydantic import AliasChoices, Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from models import IMAConfig, IMAStatus
+from .models import IMAConfig, IMAStatus
 
 
 class AppConfig(BaseSettings):
@@ -22,6 +23,7 @@ class AppConfig(BaseSettings):
     mcp_debug: bool = False
     mcp_log_level: str = "INFO"
     mcp_log_file: Optional[str] = None
+    enable_raw_logging: bool = False
     mcp_secret_key: str = "default-secret-key-change-in-production"
     mcp_server_name: str = "ima-copilot"
     mcp_server_version: str = "0.2.0"
@@ -35,7 +37,7 @@ class AppConfig(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="IMA_",
-        env_file=".env",
+        env_file=os.environ.get("IMA_ENV_FILE", ".env"),
         extra="ignore"  # 忽略额外的字段
     )
 
@@ -99,7 +101,7 @@ class IMAEnvironmentConfig(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="IMA_",
-        env_file=".env",
+        env_file=os.environ.get("IMA_ENV_FILE", ".env"),
         extra="ignore"  # 忽略额外的字段
     )
 
@@ -152,7 +154,10 @@ class ConfigManager:
             configured_single_kb_ids = self._parse_knowledge_base_ids(configured_single_kb_id)
             configured_multi_kb_ids = self._parse_knowledge_base_ids(self.env_config.knowledge_base_ids)
 
-            if configured_single_kb_id and len(configured_single_kb_ids) == 1:
+            if configured_multi_kb_ids:
+                resolved_kb_id = configured_multi_kb_ids[0]
+                resolved_kb_ids = configured_multi_kb_ids
+            elif configured_single_kb_id and len(configured_single_kb_ids) == 1:
                 resolved_kb_id = configured_single_kb_id
                 resolved_kb_ids = [configured_single_kb_id]
             elif len(configured_single_kb_ids) > 1 and not configured_multi_kb_ids:
@@ -162,9 +167,6 @@ class ConfigManager:
                 )
                 resolved_kb_id = configured_single_kb_ids[0]
                 resolved_kb_ids = configured_single_kb_ids
-            elif configured_multi_kb_ids:
-                resolved_kb_id = configured_multi_kb_ids[0]
-                resolved_kb_ids = configured_multi_kb_ids
             else:
                 resolved_kb_id = self.env_config.DEFAULT_KNOWLEDGE_BASE_ID
                 resolved_kb_ids = [resolved_kb_id]

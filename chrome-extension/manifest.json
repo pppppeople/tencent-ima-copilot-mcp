@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Kouzi IMA Auth Helper",
+  "version": "1.0.0",
+  "description": "Capture IMA auth headers from ima.qq.com and send them to the local Kouzi receiver.",
+  "content_scripts": [
+    {
+      "matches": ["https://ima.qq.com/*"],
+      "js": ["ima-auth-listener.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "host_permissions": [
+    "https://ima.qq.com/*",
+    "http://127.0.0.1:8787/*"
+  ]
+}

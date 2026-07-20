@@ -30,7 +30,7 @@ from tenacity import (
     before_sleep_log,
 )
 
-from models import (
+from .models import (
     IMAConfig,
     IMAMessage,
     MessageType,
@@ -292,7 +292,7 @@ class IMAAPIClient:
                         except json.JSONDecodeError as je:
                             self._last_auth_error = f"刷新响应解析失败: {je}"
                             logger.error(f"无法解析响应为 JSON: {je}")
-                            logger.error(f"原始响应: {response_text[:200]}")
+                            logger.error("刷新响应不是有效 JSON", response_length=len(response_text))
                             return False
                     else:
                         self._last_auth_error = f"Token刷新请求失败: HTTP {response.status}"
@@ -844,14 +844,18 @@ class IMAAPIClient:
             ) as response:
                 if response.status != 200:
                     response_text = await response.text()
-                    logger.error(f"初始化会话失败，HTTP状态码: {response.status}")
-                    raise ValueError(f"init_session HTTP错误 {response.status}: {response_text[:500]}")
+                    logger.error(
+                        "初始化会话失败",
+                        status=response.status,
+                        response_length=len(response_text),
+                    )
+                    raise ValueError(f"init_session HTTP错误 {response.status}")
                 
                 response_data = await response.json()
                 init_response = InitSessionResponse(**response_data)
 
                 if init_response.code == 0 and init_response.session_id:
-                    logger.info(f"✅ 会话初始化成功 (session_id: {init_response.session_id[:16]}...)")
+                    logger.info("✅ 会话初始化成功")
                     return init_response.session_id
                 else:
                     logger.error(f"❌ 会话初始化失败 (code: {init_response.code}): {init_response.msg}")
@@ -884,7 +888,7 @@ class IMAAPIClient:
         trace_id = str(uuid.uuid4())[:8]
         trace_logger = logger.bind(trace_id=trace_id)
 
-        trace_logger.debug("发送问题", question_preview=question[:50])
+        trace_logger.debug("发送问题", question_length=len(question))
 
         response = None
         try:
@@ -897,8 +901,12 @@ class IMAAPIClient:
             # 检查响应状态
             if response.status != 200:
                 response_text = await response.text()
-                trace_logger.error("HTTP请求失败", status=response.status, response=response_text[:500])
-                raise ValueError(f"HTTP {response.status}: {response_text[:200]}")
+                trace_logger.error(
+                    "HTTP请求失败",
+                    status=response.status,
+                    response_length=len(response_text),
+                )
+                raise ValueError(f"HTTP {response.status}")
 
             content_type = response.headers.get('content-type', '')
             if 'text/event-stream' not in content_type:
@@ -907,7 +915,7 @@ class IMAAPIClient:
                     error_data = json.loads(response_text)
                     raise ValueError(f"API错误 (code: {error_data.get('code')}): {error_data.get('msg')}")
                 except json.JSONDecodeError:
-                    raise ValueError(f"意外响应类型: {content_type}, 内容: {response_text[:200]}")
+                    raise ValueError(f"意外响应类型: {content_type}")
 
             # 处理流式响应
             message_count = 0
@@ -1060,8 +1068,15 @@ class IMAAPIClient:
                 return [IMAMessage(type=MessageType.SYSTEM, content="请求失败: Code=3 重试后仍无有效文本", raw="code3_retry_exhausted")]
 
             except Exception as e:
-                logger.exception("问答失败", question_preview=question[:50])
-                return [IMAMessage(type=MessageType.SYSTEM, content=f"请求失败: {e}", raw=str(e))]
+                error_type = type(e).__name__
+                logger.error("问答失败", error_type=error_type, question_length=len(question))
+                return [
+                    IMAMessage(
+                        type=MessageType.SYSTEM,
+                        content=f"请求失败: {error_type}",
+                        raw=error_type,
+                    )
+                ]
 
     def _extract_text_content(self, messages: List[IMAMessage]) -> str:
         """从消息列表中提取文本内容 - 仅提取文本类型的消息"""

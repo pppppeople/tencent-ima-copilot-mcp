@@ -73,18 +73,20 @@ docker-compose logs -f
 #### 1. 安装依赖
 
 ```bash
-# 安装 FastMCP、tenacity、Loguru 和所有依赖
-pip install -r requirements.txt
+# 推荐使用项目元数据安装运行与开发依赖
+python -m pip install -e '.[dev]'
 ```
 
 #### 2. 配置环境变量
 
 ```bash
-# 复制配置文件模板
-cp .env.example .env
+# 私密配置默认放在代码仓库外
+mkdir -p ~/.claude/ima
+cp .env.example ~/.claude/ima/.env
 
 # 编辑 .env 文件，填入从浏览器获取的 IMA 认证信息
-nano .env  # 或使用其他编辑器
+nano ~/.claude/ima/.env  # 或使用其他编辑器
+chmod 600 ~/.claude/ima/.env
 ```
 
 #### 必需配置项
@@ -115,11 +117,11 @@ nano .env  # 或使用其他编辑器
 ##### 方式一：使用启动脚本（推荐）
 
 ```bash
-# Windows
-start.bat
+# macOS / Linux
+./start-mcp.sh
 
-# 或使用 Python 脚本（跨平台）
-python run.py
+# 安装后也可以直接运行
+IMA_ENV_FILE="$HOME/.claude/ima/.env" ima-mcp
 ```
 
 ##### 方式二：使用 fastmcp 命令
@@ -237,14 +239,14 @@ knowledge_base_id: "7305806844290061"
 **Q: 认证失败（Token 验证失败）怎么办？**
 
 A:
-1. 检查 `.env` 文件中的 `IMA_X_IMA_COOKIE` 和 `IMA_X_IMA_BKN` 是否正确
+1. 检查 `${IMA_ENV_FILE:-~/.claude/ima/.env}` 中的 `IMA_X_IMA_COOKIE` 和 `IMA_X_IMA_BKN` 是否正确
 2. 确认 `IMA_X_IMA_COOKIE` 中包含 `IMA-REFRESH-TOKEN` 字段
 3. 重新从浏览器获取最新的认证信息
 
 **Q: 如何连接特定的知识库？**
 
 A:
-在 `.env` 文件中设置 `IMA_KNOWLEDGE_BASE_ID`（或 `knowledgeBaseId`）即可。获取方法：
+在私密 env 文件中设置 `IMA_KNOWLEDGE_BASE_ID`（或 `knowledgeBaseId`）即可。获取方法：
 1. 在 IMA 网页选择知识库
 2. 找到 `init_session` 请求
 3. 查看 Payload 中的 `knowledge_base_id`
@@ -252,7 +254,7 @@ A:
 **Q: 多知识库怎么配置和调用？**
 
 A:
-1. 在 `.env` 中设置 `IMA_KNOWLEDGE_BASE_IDS=id1,id2,id3`
+1. 在私密 env 文件中设置 `IMA_KNOWLEDGE_BASE_IDS=id1,id2,id3`
 2. 调用工具时使用 `ask_with_kb(question, knowledge_base_id)`
 3. 若调用 `ask`，会提示错误并给出可用 `knowledge_base_id` 列表
 

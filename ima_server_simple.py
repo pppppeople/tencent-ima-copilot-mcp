@@ -6,24 +6,23 @@ IMA Copilot MCP 服务器 - 基于环境变量的简化版本
 
 import sys
 import asyncio
-from pathlib import Path
+import os
 from datetime import datetime
+from pathlib import Path
 
 from fastmcp import FastMCP
 from mcp.types import TextContent
 from loguru import logger
 
-# 导入我们的模块
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
-from config import config_manager, get_config, get_app_config
-from ima_client import IMAAPIClient
+from src.config import config_manager, get_config, get_app_config
+from src.ima_client import IMAAPIClient
 
 # 配置详细的调试日志
 app_config = get_app_config()
 
 # 创建日志目录
-log_dir = Path("logs/debug")
+runtime_dir = Path(os.environ.get("IMA_RUNTIME_DIR", Path.home() / ".claude/ima")).expanduser()
+log_dir = runtime_dir / "logs/debug"
 log_dir.mkdir(parents=True, exist_ok=True)
 
 # 生成带时间戳的日志文件
@@ -39,7 +38,7 @@ logger.add(
 )
 logger.add(
     log_file,
-    level="DEBUG",
+    level=app_config.log_level.upper(),
     rotation="10 MB",
     retention="1 week",
     encoding="utf-8",
@@ -136,12 +135,11 @@ async def _ask_with_target_kb(question: str, knowledge_base_id: str) -> list[Tex
             logger.warning("⚠️ 未收到响应", knowledge_base_id=request_kb_id)
             return [TextContent(type="text", text="[ERROR] 没有收到任何响应，或者请求超时未产生任何输出")]
 
-        # 打印完整的qa结果
-        logger.info("-" * 80)
-        logger.info(f"完整 QA 结果 (知识库: {request_kb_id}, 原始消息列表):")
-        for i, msg in enumerate(messages):
-            logger.info(f"  消息 {i + 1} (类型: {msg.type.value}): {msg.content[:200]}...")
-        logger.info("-" * 80)
+        logger.info(
+            "收到 IMA 响应",
+            knowledge_base_id=request_kb_id,
+            message_count=len(messages),
+        )
 
         response = ima_client._extract_text_content(messages)
 
@@ -149,8 +147,12 @@ async def _ask_with_target_kb(question: str, knowledge_base_id: str) -> list[Tex
         if not response:
             error_msgs = [msg.content for msg in messages if msg.type == 'system']
             if error_msgs:
-                response = f"[ERROR] {'; '.join(error_msgs)}"
-                logger.warning("⚠️ 未提取到文本，返回系统错误", error=response, knowledge_base_id=request_kb_id)
+                response = "[ERROR] IMA 未返回可用的知识库文本，请换一个更贴近知识库内容的问题"
+                logger.warning(
+                    "⚠️ 未提取到文本，返回系统错误",
+                    error_count=len(error_msgs),
+                    knowledge_base_id=request_kb_id,
+                )
             else:
                 response = "没有收到有效回复"
 
@@ -180,12 +182,12 @@ async def _ask_with_target_kb(question: str, knowledge_base_id: str) -> list[Tex
         except Exception as e:
             logger.warning(f"提取参考资料失败: {e}", knowledge_base_id=request_kb_id)
 
-        # 打印返回 ask 的内容
-        logger.info("-" * 80)
-        logger.info(f"ask 工具返回内容 (知识库: {request_kb_id}, Block 数量: {len(content_list)}):")
-        for i, block in enumerate(content_list):
-            logger.info(f"Block {i+1} ({len(block.text)} chars):\n{block.text[:200]}...")
-        logger.info("-" * 80)
+        logger.info(
+            "IMA 响应已转换为 MCP 内容块",
+            knowledge_base_id=request_kb_id,
+            block_count=len(content_list),
+            response_length=sum(len(block.text) for block in content_list),
+        )
 
         return content_list
 
@@ -229,9 +231,8 @@ async def ensure_client_ready():
                     return False
 
                 try:
-                    # 启用原始SSE日志
-                    config.enable_raw_logging = True
-                    config.raw_log_dir = "logs/debug/raw"
+                    config.enable_raw_logging = app_config.enable_raw_logging
+                    config.raw_log_dir = str(log_dir / "raw")
                     config.raw_log_on_success = False
 
                     ima_client = IMAAPIClient(config)
@@ -304,7 +305,7 @@ async def ask(question: str) -> list[TextContent]:
                 )
             ]
 
-        logger.debug("🔍 ask 工具调用", question_preview=question[:50])
+        logger.debug("🔍 ask 工具调用", question_length=len(question))
 
         default_kb_id = _get_knowledge_base_ids()[0]
         return await _ask_with_target_kb(question=question, knowledge_base_id=default_kb_id)
@@ -330,7 +331,7 @@ async def ask_with_kb(question: str, knowledge_base_id: str) -> list[TextContent
 
         logger.debug(
             "🔍 ask_with_kb 工具调用",
-            question_preview=question[:50],
+            question_length=len(question),
             knowledge_base_id=knowledge_base_id,
         )
         return await _ask_with_target_kb(question=question, knowledge_base_id=knowledge_base_id)
@@ -433,9 +434,7 @@ def main():
     print(f"[INFO] 可用知识库: {', '.join(config.knowledge_base_ids)}")
 
     print("=" * 50)
-    print("启动命令:")
-    print(f"fastmcp run ima_server_simple.py:mcp --transport http --host {app_config.host} --port {app_config.port}")
-    print("=" * 50)
+    mcp.run(transport="http", host=app_config.host, port=app_config.port)
 
 
 if __name__ == "__main__":
