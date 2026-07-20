@@ -23,6 +23,7 @@ class AppConfig(BaseSettings):
     mcp_debug: bool = False
     mcp_log_level: str = "INFO"
     mcp_log_file: Optional[str] = None
+    enable_raw_logging: bool = False
     mcp_secret_key: str = "default-secret-key-change-in-production"
     mcp_server_name: str = "ima-copilot"
     mcp_server_version: str = "0.2.0"

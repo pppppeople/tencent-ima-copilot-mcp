@@ -22,3 +22,11 @@ def test_multiple_knowledge_bases_are_deduplicated(monkeypatch):
 
     assert manager.get_config().knowledge_base_id == "kb-a"
     assert manager.get_config().knowledge_base_ids == ["kb-a", "kb-b"]
+
+
+def test_raw_response_logging_is_opt_in(monkeypatch):
+    monkeypatch.delenv("IMA_ENABLE_RAW_LOGGING", raising=False)
+    assert ConfigManager().app_config.enable_raw_logging is False
+
+    monkeypatch.setenv("IMA_ENABLE_RAW_LOGGING", "true")
+    assert ConfigManager().app_config.enable_raw_logging is True
