@@ -507,6 +507,73 @@ class IMAAPIClient:
 
             json_data = json.loads(data)
 
+            # IMA's web client started returning an envelope with capitalized
+            # fields in August 2026. Text now arrives as small blockMessage
+            # fragments instead of a top-level content/Text field.
+            envelope_type = json_data.get('Type')
+            envelope_data = json_data.get('Data')
+
+            if envelope_type == 'blockMessage' and isinstance(envelope_data, dict):
+                text_message = envelope_data.get('text_message') or envelope_data.get('textMessage')
+                if isinstance(text_message, dict):
+                    text = (
+                        text_message.get('Text')
+                        or text_message.get('text')
+                        or text_message.get('content')
+                    )
+                    if isinstance(text, str) and text:
+                        return TextMessage(
+                            type=MessageType.TEXT,
+                            content=text,
+                            text=text,
+                            raw=data,
+                        )
+                return None
+
+            if envelope_type == 'fileList' and isinstance(envelope_data, dict):
+                file_list = envelope_data.get('file_list') or envelope_data.get('fileList')
+                if not isinstance(file_list, dict):
+                    return None
+
+                medias = []
+                for item in file_list.get('files', []):
+                    if not isinstance(item, dict):
+                        continue
+
+                    media_id = item.get('id')
+                    media_type = item.get('type')
+                    title = item.get('title')
+                    if media_id is None or media_type is None or not title:
+                        continue
+
+                    try:
+                        medias.append(MediaInfo(
+                            id=str(media_id),
+                            type=int(media_type),
+                            title=str(title),
+                            subtitle=item.get('subtitle'),
+                            introduction=item.get('introduction') or item.get('description'),
+                            publisher=item.get('publisher'),
+                            source_type=item.get('source_type') or item.get('sourceType'),
+                        ))
+                    except (TypeError, ValueError):
+                        logger.debug("Skipping malformed IMA fileList item")
+
+                if medias:
+                    return KnowledgeBaseMessage(
+                        type=MessageType.KNOWLEDGE_BASE,
+                        content=file_list.get('description') or '参考资料',
+                        medias=medias,
+                        raw=data,
+                    )
+                return None
+
+            # Loading/create/delete messages are UI state updates and contain
+            # no answer text. Ignoring them prevents a healthy response from
+            # being misclassified as a collection of system errors.
+            if envelope_type == 'loading':
+                return None
+
             if 'msgs' in json_data and isinstance(json_data['msgs'], list):
                 for msg in json_data['msgs']:
                     if isinstance(msg, dict) and 'content' in msg:
@@ -553,11 +620,16 @@ class IMAAPIClient:
                         raw=data
                     )
 
-            return IMAMessage(
-                type=MessageType.SYSTEM,
-                content=str(json_data),
-                raw=data
-            )
+            # Preserve API error codes for the existing retry/auth logic, but
+            # ignore successful metadata frames that do not carry user text.
+            if 'Code' in json_data or 'code' in json_data:
+                return IMAMessage(
+                    type=MessageType.SYSTEM,
+                    content=str(json_data),
+                    raw=data,
+                )
+
+            return None
 
         except (json.JSONDecodeError, KeyError, ValueError):
             raise
