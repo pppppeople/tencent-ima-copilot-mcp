@@ -147,6 +147,19 @@ npx @modelcontextprotocol/inspector
 - **日志文件**: `<IMA_RUNTIME_DIR>/logs/debug/ima_server_YYYYMMDD_HHMMSS.log`（Loguru 自动生成和管理）
 - **原始 SSE 日志**: `<IMA_RUNTIME_DIR>/logs/debug/raw/sse_*.log`（发生错误时自动保存）
 
+## 自动生成文件的归属
+
+| 用途 | 现役路径 | 说明 |
+| --- | --- | --- |
+| 私人认证配置 | `${IMA_ENV_FILE:-~/.claude/ima/.env}` | 登录态助手更新此文件，权限 `0600`；不是交付物 |
+| MCP 日志 | `${IMA_RUNTIME_DIR:-~/.claude/ima}/logs/debug/` | 时间批次日志与轮转由 Loguru 管理 |
+| 原始 SSE 错误日志 | `<IMA_RUNTIME_DIR>/logs/debug/raw/` | 仅启用原始日志时生成，不放源码或公开输出目录 |
+| 登录态接收器日志 | `<IMA_RUNTIME_DIR>/logs/ima_auth_receiver.log` | 接收器自己的运行日志 |
+| 测试、覆盖率与开发环境 | `.pytest_cache/`、`.coverage`、`htmlcov/`、`.venv/` | 工具管理并忽略，不当作业务交付物 |
+
+`IMA_ENV_FILE` 指定认证文件；`IMA_RUNTIME_DIR` 指定日志根，两者独立。
+启动脚本默认使用上表私人路径；直接运行 `ima-mcp` 时仍按[启动示例](#4-启动服务器)显式提供 `IMA_ENV_FILE`，兼容配置读取器也支持工作目录的 `.env`，但不自动创建它。自定义路径按其用途保持私人边界，不因改变工作目录把运行日志落进源码。新增一次性导出放项目 `artifacts/<任务>/`，按需建立 outputs/sources/tmp/backups；不移动或删除现役运行数据。`tests/test_storage_paths.py` 使用假认证与临时 home 验证实际 writer 的默认及覆盖路径，不联系真实 IMA。
+
 ## 可用的 MCP 工具
 
 ### 1. `ask`
@@ -211,6 +224,8 @@ knowledge_base_id: "7305806844290061"
 |--------|------|--------|
 | `IMA_KNOWLEDGE_BASE_ID` / `knowledgeBaseId` | 单知识库 ID（两者等价） | 无（必须显式配置） |
 | `IMA_KNOWLEDGE_BASE_IDS` / `knowledgeBaseIds` | 多知识库 ID 列表（逗号分隔） | 无 |
+| `IMA_RUNTIME_DIR` | 私人日志根目录 | `~/.claude/ima/` |
+| `IMA_ENV_FILE` | 认证配置路径（启动脚本默认） | `~/.claude/ima/.env` |
 | `IMA_MCP_HOST` | MCP 服务器地址 | `127.0.0.1` |
 | `IMA_MCP_PORT` | MCP 服务器端口 | `8081` |
 | `IMA_MCP_LOG_LEVEL` | 日志级别 (支持 `DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
