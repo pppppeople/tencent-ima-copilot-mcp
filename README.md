@@ -143,8 +143,9 @@ npx @modelcontextprotocol/inspector
 ### 服务端点
 
 - **MCP 协议端点**: `http://127.0.0.1:8081/mcp`（用于 MCP Inspector 或其他 MCP 客户端）
-- **日志文件**: `logs/debug/ima_server_YYYYMMDD_HHMMSS.log`（Loguru 自动生成和管理）
-- **原始 SSE 日志**: `logs/debug/raw/sse_*.log`（发生错误时自动保存）
+- **私人运行目录**: `IMA_RUNTIME_DIR`，默认 `~/.claude/ima/`；日志不写入项目源码目录。
+- **日志文件**: `<IMA_RUNTIME_DIR>/logs/debug/ima_server_YYYYMMDD_HHMMSS.log`（Loguru 自动生成和管理）
+- **原始 SSE 日志**: `<IMA_RUNTIME_DIR>/logs/debug/raw/sse_*.log`（发生错误时自动保存）
 
 ## 可用的 MCP 工具
 
