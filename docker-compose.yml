@@ -2,7 +2,8 @@ version: '3.8'
 
 services:
   ima-mcp-server:
-    image: highkay/tencent-ima-copilot-mcp:latest
+    build: .
+    image: ima-copilot-mcp:local
     container_name: ima-copilot-mcp
     restart: unless-stopped
 
@@ -27,6 +28,7 @@ services:
       IMA_MCP_PORT: "8081"
       IMA_MCP_DEBUG: "${IMA_MCP_DEBUG:-false}"
       IMA_MCP_LOG_LEVEL: "${IMA_MCP_LOG_LEVEL:-INFO}"
+      IMA_RUNTIME_DIR: "/app/runtime"
 
       # API 配置
       IMA_REQUEST_TIMEOUT: "${IMA_REQUEST_TIMEOUT:-30}"
@@ -38,9 +40,9 @@ services:
     ports:
       - "8081:8081"
 
-    # 持久化日志
+    # 私人运行日志持久化；不写到项目源码目录
     volumes:
-      - ./logs:/app/logs
+      - "${HOME}/.claude/ima/container-runtime:/app/runtime"
 
     # Health check
     healthcheck:

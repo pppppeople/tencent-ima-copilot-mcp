@@ -67,3 +67,32 @@ with patch('pathlib.Path.home', return_value=Path(sys.argv[1])):
     assert credential.is_file() and credential.stat().st_mode & 0o777 == 0o600
     assert "IMA_KNOWLEDGE_BASE_ID=test-kb" in credential.read_text()
     assert list(working.iterdir()) == []
+
+
+def test_container_launchers_persist_the_runtime_selected_by_the_writer(tmp_path, monkeypatch):
+    import re
+    import shlex
+
+    project = Path(__file__).parents[1]
+    dockerfile = (project / "Dockerfile").read_text()
+    compose = (project / "docker-compose.yml").read_text()
+    readme = (project / "README.md").read_text()
+    runtime = next(
+        shlex.split(line)[1].split("=", 1)[1]
+        for line in dockerfile.splitlines()
+        if line.startswith("ENV IMA_RUNTIME_DIR=")
+    )
+    compose_runtime = re.search(r'^\s+IMA_RUNTIME_DIR:\s*"([^"\n]+)"', compose, re.MULTILINE).group(1)
+    volume_block = compose.split("    volumes:", 1)[1]
+    host, target = re.search(r'^\s+- "([^"\n]+)"', volume_block, re.MULTILINE).group(1).split(":", 1)
+    assert "    build: ." in compose
+    assert "docker build -t ima-copilot-mcp:local ." in readme
+    assert Path(runtime).is_absolute()
+    assert compose_runtime == runtime == target
+    monkeypatch.setenv("HOME", str(tmp_path / "owner-home"))
+    host_path = Path(os.path.expandvars(host))
+    assert host_path == Path.home() / ".claude/ima/container-runtime"
+    assert f"-e IMA_RUNTIME_DIR={runtime}" in readme
+    run_host, run_target = re.search(r'-v "([^"\n]+)"', readme).group(1).split(":", 1)
+    assert run_target == runtime
+    assert Path(os.path.expandvars(run_host)) == host_path

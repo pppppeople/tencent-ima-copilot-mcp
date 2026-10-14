@@ -39,3 +39,7 @@ MCP and auth-receiver logs stay under `IMA_RUNTIME_DIR` (default
 Keep these private runtime writes out of source and public artifact folders.
 New one-off exports use `artifacts/<task>/` by purpose and update the maintained
 README; the storage-path regression uses dummy credentials and an isolated home.
+
+Container launchers must keep their `IMA_RUNTIME_DIR` equal to the persisted
+container mount target; the host default belongs to the owner's private
+`~/.claude/ima/container-runtime/`, separate from local-service logs.
