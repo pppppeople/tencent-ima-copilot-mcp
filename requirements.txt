@@ -2,6 +2,7 @@
 # The authoritative dependency set is pyproject.toml; prefer:
 #   python -m pip install -e .
 fastmcp>=2.11,<3
+httpx>=0.25,<1
 fastapi>=0.115,<1
 uvicorn[standard]>=0.32,<1
 jinja2>=3.1.4,<4

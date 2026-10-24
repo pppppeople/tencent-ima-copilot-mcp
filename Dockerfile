@@ -39,6 +39,9 @@ ENV IMA_MCP_PORT=8081
 ENV IMA_MCP_DEBUG=false
 ENV IMA_MCP_LOG_LEVEL=INFO
 
+# Keep the log writer inside the directory persisted by container launchers.
+ENV IMA_RUNTIME_DIR=/app/runtime
+
 # IMA API configuration
 ENV IMA_REQUEST_TIMEOUT=30
 ENV IMA_RETRY_COUNT=3
@@ -46,9 +49,6 @@ ENV IMA_PROXY=""
 
 # Expose MCP server port
 EXPOSE 8081
-
-# Create logs directory
-RUN mkdir -p /app/logs/debug/raw
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
