@@ -18,12 +18,6 @@ from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 
 MCP_URL = os.environ.get("IMA_MCP_URL", "http://127.0.0.1:8081/mcp")
-INVALID_CONTENT_MARKERS = (
-    "加入知识库才能继续提问",
-    "暂无权限",
-    "无权限",
-    "知识库不存在",
-)
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
@@ -72,24 +66,25 @@ async def query(question: str, knowledge_base_id: str | None = None) -> dict[str
             result = await client.call_tool(
                 "ask_with_kb",
                 {"question": question, "knowledge_base_id": knowledge_base_id},
+                raise_on_error=False,
             )
         else:
-            result = await client.call_tool("ask", {"question": question})
+            result = await client.call_tool("ask", {"question": question}, raise_on_error=False)
     text = content_to_text(result)
-    marker = next((item for item in INVALID_CONTENT_MARKERS if item in text), None)
-    is_error = (
-        bool(getattr(result, "is_error", False))
-        or text.startswith("[ERROR]")
-        or bool(marker)
+    structured = getattr(result, "structured_content", None) or {}
+    status = structured.get("status", "failed")
+    ok = (
+        status == "complete"
+        and structured.get("ok") is True
+        and not bool(getattr(result, "is_error", False))
     )
-    error = (
-        f"IMA 返回提示：{marker}。请在浏览器打开目标 IMA 知识库，确认已加入/有权限后，再点“更新 IMA 登录态御札”书签并在知识库里问一句。"
-        if marker
-        else None
-    )
-    payload = {"ok": not is_error, "question": question, "answer": text}
-    if error:
-        payload["error"] = error
+    payload = {
+        "ok": ok, "question": question, "answer": text,
+        "status": status, "truncated": bool(structured.get("truncated", False)),
+        "error_category": structured.get("error_category"),
+    }
+    if not ok:
+        payload["error"] = structured.get("error") or "MCP 未返回完整成功结果"
     return payload
 
 

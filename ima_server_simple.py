@@ -11,11 +11,13 @@ from datetime import datetime
 from pathlib import Path
 
 from fastmcp import FastMCP
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
+from fastmcp.tools.tool import ToolResult
 from loguru import logger
 
 from src.config import config_manager, get_config, get_app_config
 from src.ima_client import IMAAPIClient
+from src.models import AnswerResult
 
 # 配置详细的调试日志
 app_config = get_app_config()
@@ -52,7 +54,6 @@ mcp = FastMCP("IMA Copilot")
 
 # 全局变量
 ima_client: IMAAPIClient = None
-_token_refreshed: bool = False  # 标记 token 是否已刷新
 _client_init_lock = asyncio.Lock()
 
 
@@ -91,119 +92,84 @@ def _is_multi_knowledge_base_mode() -> bool:
 def _validate_knowledge_base_id(knowledge_base_id: str) -> tuple[bool, str]:
     kb_id = (knowledge_base_id or "").strip()
     if not kb_id:
-        return False, "[ERROR] knowledge_base_id 不能为空"
+        return False, "knowledge_base_id 不能为空"
 
     allowed_ids = _get_knowledge_base_ids()
     if kb_id not in allowed_ids:
         return False, (
-            "[ERROR] knowledge_base_id 不在允许列表中，"
+            "knowledge_base_id 不在允许列表中，"
             f"可用值: {', '.join(allowed_ids)}"
         )
 
     return True, ""
 
 
-async def _ask_with_target_kb(question: str, knowledge_base_id: str) -> list[TextContent]:
-    """执行一次指定知识库的问答"""
-    global ima_client
+class AnswerToolResult(ToolResult):
+    """保留原有文本块，同时把问答终态传到 MCP 协议边界。"""
 
+    def to_mcp_result(self) -> CallToolResult:
+        return CallToolResult(
+            content=self.content,
+            structuredContent=self.structured_content,
+            isError=self.structured_content["status"] != "complete",
+        )
+
+
+def _answer_tool_result(result: AnswerResult, content: list[TextContent]) -> AnswerToolResult:
+    return AnswerToolResult(
+        content=content,
+        structured_content={
+            "ok": result.status == "complete",
+            "status": result.status,
+            "truncated": result.truncated,
+            "error_category": result.error_category,
+            "error": result.error,
+        },
+    )
+
+
+def _failed_answer(error: str, category: str) -> AnswerToolResult:
+    result = AnswerResult(status="failed", error=error, error_category=category)
+    return _answer_tool_result(result, [TextContent(type="text", text=error)])
+
+
+async def _ask_with_target_kb(question: str, knowledge_base_id: str) -> AnswerToolResult:
+    """执行一次指定知识库的问答，并显式交付完整性和错误类别。"""
     if not question or not question.strip():
-        return [TextContent(type="text", text="[ERROR] 问题不能为空")]
-
-    is_valid_kb_id, kb_error = _validate_knowledge_base_id(knowledge_base_id)
-    if not is_valid_kb_id:
-        return [TextContent(type="text", text=kb_error)]
-
-    request_kb_id = knowledge_base_id.strip()
+        return _failed_answer("问题不能为空", "validation")
+    valid, error = _validate_knowledge_base_id(knowledge_base_id)
+    if not valid:
+        return _failed_answer(error, "validation")
 
     try:
-        logger.debug("发送问题", length=len(question), knowledge_base_id=request_kb_id)
-
-        # 增加超时时间以支持长回复
-        # 注意：某些 MCP 客户端（如 Claude Desktop）可能有自己的 60秒超时限制
-        mcp_safe_timeout = 300
-
-        # 将超时控制传递给 ask_question_complete，以便在超时时返回部分结果
-        messages = await ima_client.ask_question_complete(
-            question,
-            timeout=mcp_safe_timeout,
-            knowledge_base_id=request_kb_id,
+        result = await ima_client.ask_question_complete(
+            question, timeout=300, knowledge_base_id=knowledge_base_id.strip()
         )
+        response = ima_client._extract_text_content(result.messages) if result.messages else ""
+        if result.status == "failed":
+            return _answer_tool_result(result, [TextContent(type="text", text=result.error or "询问失败")])
+        if result.status == "partial":
+            response += f"\n\n[截断] 回答未完整接收（{result.error_category}），请重试。"
+        content = [TextContent(type="text", text=response)]
 
-        # 即使没有消息，也会返回包含错误信息的消息列表
-        if not messages:
-            logger.warning("⚠️ 未收到响应", knowledge_base_id=request_kb_id)
-            return [TextContent(type="text", text="[ERROR] 没有收到任何响应，或者请求超时未产生任何输出")]
-
-        logger.info(
-            "收到 IMA 响应",
-            knowledge_base_id=request_kb_id,
-            message_count=len(messages),
-        )
-
-        response = ima_client._extract_text_content(messages)
-
-        # 如果没有提取到文本内容，检查是否有系统错误消息
-        if not response:
-            error_msgs = [msg.content for msg in messages if msg.type == 'system']
-            if error_msgs:
-                response = "[ERROR] IMA 未返回可用的知识库文本，请换一个更贴近知识库内容的问题"
-                logger.warning(
-                    "⚠️ 未提取到文本，返回系统错误",
-                    error_count=len(error_msgs),
-                    knowledge_base_id=request_kb_id,
-                )
-            else:
-                response = "没有收到有效回复"
-
-        logger.debug("✅ 获取响应", length=len(response), knowledge_base_id=request_kb_id)
-
-        content_list = [TextContent(type="text", text=response)]
-
-        # 提取并添加参考资料信息
-        try:
-            knowledge_info = ima_client._extract_knowledge_info(messages)
-            if knowledge_info:
-                ref_text = "### 📚 参考资料\n\n"
-                for i, item in enumerate(knowledge_info, 1):
-                    title = item.get('title', '未知标题')
-                    intro = item.get('introduction', '')
-                    # 截断过长的简介
-                    if intro and len(intro) > 150:
-                        intro = intro[:150] + "..."
-
-                    ref_text += f"{i}. **{title}**\n"
-                    if intro:
-                        ref_text += f"   > {intro}\n"
-                    ref_text += "\n"
-
-                content_list.append(TextContent(type="text", text=ref_text))
-                logger.debug("✅ 添加参考资料", count=len(knowledge_info), knowledge_base_id=request_kb_id)
-        except Exception as e:
-            logger.warning(f"提取参考资料失败: {e}", knowledge_base_id=request_kb_id)
-
-        logger.info(
-            "IMA 响应已转换为 MCP 内容块",
-            knowledge_base_id=request_kb_id,
-            block_count=len(content_list),
-            response_length=sum(len(block.text) for block in content_list),
-        )
-
-        return content_list
-
-    except Exception as e:
-        logger.exception("询问 IMA 时发生错误", knowledge_base_id=request_kb_id)
-
-        # 返回更友好的错误信息
-        error_str = str(e).lower()
-        if "超时" in str(e) or "timeout" in error_str:
-            return [TextContent(type="text", text="[ERROR] 请求超时，请稍后重试")]
-        elif "认证" in str(e) or "auth" in error_str:
-            return [TextContent(type="text", text="[ERROR] 认证失败，请检查 IMA 配置信息")]
-        elif "网络" in str(e) or "network" in error_str or "connection" in error_str:
-            return [TextContent(type="text", text="[ERROR] 网络连接失败，请检查网络设置")]
-        else:
-            return [TextContent(type="text", text=f"[ERROR] 询问失败: {str(e)}")]
+        # 完整回答沿用原有文本及参考资料格式。
+        knowledge_info = ima_client._extract_knowledge_info(result.messages)
+        if knowledge_info:
+            ref_text = "### 📚 参考资料\n\n"
+            for i, item in enumerate(knowledge_info, 1):
+                title = item.get('title', '未知标题')
+                intro = item.get('introduction', '')
+                if intro and len(intro) > 150:
+                    intro = intro[:150] + "..."
+                ref_text += f"{i}. **{title}**\n"
+                if intro:
+                    ref_text += f"   > {intro}\n"
+                ref_text += "\n"
+            content.append(TextContent(type="text", text=ref_text))
+        return _answer_tool_result(result, content)
+    except Exception as exc:
+        logger.error("询问 IMA 时发生错误", error_category=type(exc).__name__)
+        return _failed_answer("询问 IMA 失败", IMAAPIClient._error_category(exc))
 
 
 # @mcp.on_shutdown()
@@ -217,8 +183,8 @@ async def _ask_with_target_kb(question: str, knowledge_base_id: str) -> list[Tex
 
 
 async def ensure_client_ready():
-    """确保客户端已初始化并且 token 有效"""
-    global ima_client, _token_refreshed
+    """确保客户端已初始化；token 校验由问答重试链路负责。"""
+    global ima_client
 
     if not ima_client:
         async with _client_init_lock:
@@ -241,38 +207,12 @@ async def ensure_client_ready():
                     logger.exception("❌ IMA 客户端初始化失败")
                     return False
     
-    # 如果还没刷新过 token，提前刷新一次（添加超时保护）
-    if not _token_refreshed:
-        logger.info("🔄 验证 token...")
-        try:
-            import asyncio
-            # 为token刷新也添加超时保护（15秒）
-            token_valid = await asyncio.wait_for(
-                ima_client.ensure_valid_token(),
-                timeout=15.0
-            )
-            
-            if token_valid:
-                _token_refreshed = True
-                logger.info("✅ Token 验证成功")
-                return True
-            else:
-                logger.warning("⚠️ Token 验证失败，尝试继续...")
-                # 即使刷新失败也标记为 True，让后续请求在 ask_question 内部触发自动重试逻辑
-                _token_refreshed = True 
-                return True
-        except asyncio.TimeoutError:
-            logger.error("❌ Token 验证超时")
-            return False
-        except Exception as e:
-            logger.exception("❌ Token 验证异常")
-            return False
-    
+    # Token 校验留在问答链路内，网络错误由其 Tenacity 重试及结果契约处理。
     return True
 
 
 @mcp.tool()
-async def ask(question: str) -> list[TextContent]:
+async def ask(question: str) -> ToolResult:
     """向腾讯 IMA 知识库询问任何问题
 
     Args:
@@ -289,21 +229,17 @@ async def ask(question: str) -> list[TextContent]:
     
     # 绑定上下文
     with logger.contextualize(request_id=request_id):
-        # 确保客户端已初始化并且 token 有效
+        # 确保客户端已初始化
         if not await ensure_client_ready():
-            return [TextContent(type="text", text="[ERROR] IMA 客户端初始化或 token 刷新失败，请检查配置")]
+            return _failed_answer("IMA 客户端初始化失败，请检查配置", "configuration")
 
         if _is_multi_knowledge_base_mode():
             kb_ids = _get_knowledge_base_ids()
-            return [
-                TextContent(
-                    type="text",
-                    text=(
-                        "[ERROR] 当前为多知识库模式，请使用 ask_with_kb 并传入 knowledge_base_id。"
-                        f"可用值: {', '.join(kb_ids)}"
-                    ),
-                )
-            ]
+            return _failed_answer(
+                "当前为多知识库模式，请使用 ask_with_kb 并传入 knowledge_base_id。"
+                f"可用值: {', '.join(kb_ids)}",
+                "validation",
+            )
 
         logger.debug("🔍 ask 工具调用", question_length=len(question))
 
@@ -312,7 +248,7 @@ async def ask(question: str) -> list[TextContent]:
 
 
 @mcp.tool()
-async def ask_with_kb(question: str, knowledge_base_id: str) -> list[TextContent]:
+async def ask_with_kb(question: str, knowledge_base_id: str) -> ToolResult:
     """向指定知识库询问问题（多知识库模式使用）
 
     Args:
@@ -327,7 +263,7 @@ async def ask_with_kb(question: str, knowledge_base_id: str) -> list[TextContent
     request_id = str(uuid.uuid4())[:8]
     with logger.contextualize(request_id=request_id):
         if not await ensure_client_ready():
-            return [TextContent(type="text", text="[ERROR] IMA 客户端初始化或 token 刷新失败，请检查配置")]
+            return _failed_answer("IMA 客户端初始化失败，请检查配置", "configuration")
 
         logger.debug(
             "🔍 ask_with_kb 工具调用",

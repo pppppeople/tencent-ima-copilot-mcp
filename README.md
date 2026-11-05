@@ -188,7 +188,7 @@ npx @modelcontextprotocol/inspector
 - 内置并发限流（默认 `IMA_ASK_CONCURRENCY_LIMIT=1`）
 - 检测到 `Code=3` 且无文本时自动指数退避重试（最多 2 次）
 - **300 秒超时保护**，防止长时间等待
-- 返回内容为 **`TextContent` 列表**，包含**回答文本**和格式化后的**参考资料**
+- MCP `content` 保留原有 **`TextContent` 列表**，包含**回答文本**和格式化后的**参考资料**；`structuredContent` 明确标识完整性与错误（见下方契约）。
 
 > 注意：当配置了多个知识库 ID 时，`ask` 会直接报错并提示改用 `ask_with_kb`。
 
@@ -204,6 +204,24 @@ npx @modelcontextprotocol/inspector
 ```
 问题: "总结这个知识库的核心内容"
 knowledge_base_id: "7305806844290061"
+```
+
+### 问答结果与流消费契约
+
+- 一个 HTTP 响应按 `Content-Type` 只选择一次 JSON 或 SSE 解析。SSE 增量消费，支持旧文本格式、引用、跨块 UTF-8 及无末尾换行；不再按 chunk 数重放整段响应。坏帧局部跳过后仍解析后续帧，但最终显式标为解析异常，不能报完整成功。
+- `ask_question_complete()` 返回 `AnswerResult`（原先为消息列表）：`status` 为 `complete` / `partial` / `failed`，另含 `messages`、`truncated`、`error_category`、`error`。提取文本或引用的直接调用方应改传 `result.messages`。
+- `complete` 表示正常读到 EOF、收到有效回答文本且无 API 错误码；完整回答与参考资料的格式保持不变。当前兼容协议不强制要求 `[DONE]`，所以无法识别未报告传输错误的服务端提前 EOF。
+- 超时、载荷错误、网络断开、坏帧等发生后，已有文本返回 `partial`，`truncated=true`，文本明确附加“截断”提示并保留错误类别；没有可用文本则为 `failed`。部分回答不自动重发或拼接另一请求的回答。
+- 刷新 Token 的网络异常继续抛给 Tenacity 重试，不转换为认证失败；明确认证失败不按网络错误重试。未收到文本的瞬态问答故障继续重试，`Code=3` 重试耗尽返回失败。总超时同时约束流读取和重试等待，静默流也会终止。
+- MCP 的 `structuredContent` 含 `ok`、`status`、`truncated`、`error_category`、`error`；部分或失败结果同时设置协议 `isError=true`。类别包括 `timeout`、`payload`、`network`、`parse`、`authentication`、`api`、`response`，参数/初始化错误使用 `validation` / `configuration`。
+- `query_ima.py` / `ima-query` 从结构化状态及 MCP 错误标志判断 `ok`，不再猜测 `[ERROR]` 文本前缀；缺少结果契约时不报成功。JSON 输出保留 `question`、`answer`，增加 `status`、`truncated`、`error_category`；部分/失败时 `ok=false`，退出码为 2；调用异常退出码为 1。更新消费方时需配套更新 MCP 服务端，旧服务的无结构化结果不视为完整成功。
+
+合成回归位于 `tests/test_stream_results.py` 和 `tests/test_mcp_results.py`，覆盖单次消费、完整性、重试及内存 MCP→CLI 契约，不联系真实 IMA、不启动服务。开发验证：
+
+```bash
+python -m pytest -q
+python -m py_compile ima_server_simple.py query_ima.py src/*.py
+git diff --check
 ```
 
 ## 可用的 MCP 资源

@@ -32,6 +32,7 @@ from tenacity import (
 
 from .models import (
     IMAConfig,
+    AnswerResult,
     IMAMessage,
     MessageType,
     KnowledgeBaseMessage,
@@ -57,6 +58,10 @@ from .models import (
 
 class AuthenticationError(ValueError):
     """不可重试的认证异常"""
+
+
+class StreamParseError(ValueError):
+    """响应包含无法解析的数据帧。"""
 
 
 class IMAAPIClient:
@@ -295,10 +300,15 @@ class IMAAPIClient:
                             logger.error("刷新响应不是有效 JSON", response_length=len(response_text))
                             return False
                     else:
+                        if response.status == 429 or response.status >= 500:
+                            response.raise_for_status()
                         self._last_auth_error = f"Token刷新请求失败: HTTP {response.status}"
                         logger.error(f"Token刷新请求失败: HTTP {response.status}")
                         return False
 
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                # 让 Tenacity 识别网络故障，不能将其降格为认证失败。
+                raise
             except Exception as e:
                 self._last_auth_error = f"Token刷新异常: {type(e).__name__}: {e}"
                 logger.error(f"Token刷新异常: {type(e).__name__}: {e}")
@@ -642,87 +652,58 @@ class IMAAPIClient:
         attempt_index: int,
         question: Optional[str],
     ) -> AsyncGenerator[IMAMessage, None]:
-        """处理 SSE 流"""
+        """单次消费 SSE；完整缓冲仅用于诊断，不参与回放。"""
         buffer = ""
         full_response = ""
         message_count = 0
         parsed_message_count = 0
         failed_parse_count = 0
-        initial_timeout = 180
-        chunk_timeout = 120
-        last_data_time = asyncio.get_event_loop().time()
-        start_time = asyncio.get_event_loop().time()
-        has_received_data = False
-        sample_chunks = []
         stream_error: Optional[str] = None
-        
-        # 使用增量解码器处理可能被截断的多字节字符
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        start_time = time.monotonic()
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+
+        def parse_line(line: str) -> Optional[IMAMessage]:
+            nonlocal failed_parse_count
+            line = line.strip()
+            if not line or line.startswith((":", "event:", "id:", "retry:")):
+                return None
+            try:
+                return self._parse_sse_message(line)
+            except (ValueError, KeyError, TypeError, AttributeError):
+                failed_parse_count += 1
+                return None
 
         try:
-            logger.debug(f"🔄 [SSE流] 开始读取 (trace_id={trace_id})")
-            logger.debug(f"  手动超时配置: initial={initial_timeout}s, chunk={chunk_timeout}s")
-            
             async for chunk in response.content:
-                current_time = asyncio.get_event_loop().time()
+                message_count += 1
+                chunk_str = decoder.decode(chunk, final=False)
+                buffer += chunk_str
+                full_response += chunk_str
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    message = parse_line(line)
+                    if message:
+                        parsed_message_count += 1
+                        yield message
 
-                timeout_threshold = chunk_timeout if has_received_data else initial_timeout
-                elapsed_since_last_data = current_time - last_data_time
-                
-                # 手动超时检查（通常不会触发，因为aiohttp的timeout会先触发）
-                if elapsed_since_last_data > timeout_threshold:
-                    stream_error = f"Manual timeout after {elapsed_since_last_data:.1f}s with {message_count} chunks"
-                    logger.warning(f"⏰ [SSE流] 手动超时触发: {stream_error}")
-                    break
-
-                if chunk:
-                    has_received_data = True
-                    last_data_time = current_time
-                    message_count += 1
-
-                    # 使用增量解码器解码
-                    chunk_str = decoder.decode(chunk, final=False)
-
-                    buffer += chunk_str
-                    full_response += chunk_str
-
-                    while '\n' in buffer:
-                        line, buffer = buffer.split('\n', 1)
-                        line = line.strip()
-                        if line:
-                            try:
-                                message = self._parse_sse_message(line)
-                                if message:
-                                    parsed_message_count += 1
-                                    yield message
-                            except (json.JSONDecodeError, KeyError, ValueError):
-                                failed_parse_count += 1
-
-
-        except asyncio.TimeoutError:
-            if has_received_data and parsed_message_count > 0:
-                stream_error = None
-            else:
-                stream_error = "SSE timeout"
-                logger.error(f"❌ [SSE流] 超时错误（未收到数据）, trace_id={trace_id}")
-        except aiohttp.ClientPayloadError as exc:
-            stream_error = f"SSE payload error: {exc}"
-            logger.error(f"❌ [SSE流] ClientPayloadError: {exc}, trace_id={trace_id}")
+            # EOF 也是合法的末行边界；异常退出时不解析未完成的数据帧。
+            remaining = decoder.decode(b"", final=True)
+            buffer += remaining
+            full_response += remaining
+            if buffer.strip():
+                message = parse_line(buffer)
+                if message:
+                    parsed_message_count += 1
+                    yield message
+            if failed_parse_count:
+                raise StreamParseError(f"SSE 含 {failed_parse_count} 个坏帧")
         except Exception as exc:
-            stream_error = f"SSE exception: {exc}"
-            logger.error(f"❌ [SSE流] 未知异常: {type(exc).__name__}: {exc}, trace_id={trace_id}\n{traceback.format_exc()}")
+            stream_error = type(exc).__name__
+            logger.warning("SSE 未完整结束", error_category=stream_error, trace_id=trace_id)
+            raise
         finally:
-            # 确保响应被正确关闭
             if not response.closed:
                 response.close()
-            
-            # 刷新解码器中剩余的字节
-            remaining_str = decoder.decode(b"", final=True)
-            if remaining_str:
-                buffer += remaining_str
-                full_response += remaining_str
-
-            elapsed_time = asyncio.get_event_loop().time() - start_time
             self._persist_raw_response(
                 trace_id=trace_id,
                 attempt_index=attempt_index,
@@ -731,67 +712,38 @@ class IMAAPIClient:
                 message_count=message_count,
                 parsed_message_count=parsed_message_count,
                 failed_parse_count=failed_parse_count,
-                elapsed_time=elapsed_time,
+                elapsed_time=time.monotonic() - start_time,
                 stream_error=stream_error,
             )
+        logger.info("SSE 处理完成", trace_id=trace_id, message_count=parsed_message_count)
 
-        # 处理剩余的缓冲区内容
-        if buffer.strip():
-            remaining_lines = buffer.strip().split('\n')
-            for i, line in enumerate(remaining_lines):
-                line = line.strip()
-                if line:
-                    try:
-                        message = self._parse_sse_message(line)
-                        if message:
-                            parsed_message_count += 1
-                            yield message
-                    except (json.JSONDecodeError, KeyError, ValueError):
-                        failed_parse_count += 1
-
-        if message_count < 100 or not has_received_data:
-            try:
-                if full_response.strip():
-                    response_data = json.loads(full_response.strip())
-                    messages = self._extract_messages_from_response(response_data)
-                    for message in messages:
-                        yield message
-
-            except json.JSONDecodeError:
-                if full_response:
-                    lines = full_response.split('\n')
-                    for i, line in enumerate(lines):
-                        line = line.strip()
-                        if line and line != '[DONE]':
-                            message = self._parse_sse_message(line)
-                            if message:
-                                parsed_message_count += 1
-                                yield message
-                            else:
-                                failed_parse_count += 1
-
-        elapsed_time = asyncio.get_event_loop().time() - start_time
-        
-        logger.info("=" * 80)
-        logger.info(f"✅ [SSE流] 处理完成 (trace_id={trace_id})")
-        logger.info(f"  收到数据块: {message_count} 个, 成功解析: {parsed_message_count} 条, 失败: {failed_parse_count} 次")
-        logger.info(f"  响应大小: {len(full_response)} 字节, 耗时: {elapsed_time:.1f} 秒")
-        
-        if stream_error:
-            logger.warning(f"  ⚠️ 流错误: {stream_error}")
-        
-        # 诊断信息：如果耗时接近30秒，很可能是aiohttp的total timeout触发
-        if 29.0 <= elapsed_time <= 31.0:
-            logger.warning(f"  ⚠️ [诊断] 耗时正好约30秒，怀疑是aiohttp的ClientTimeout.total触发")
-            logger.warning(f"  ⚠️ [诊断] 建议检查 IMAConfig.timeout 配置值（当前: {getattr(self.config, 'timeout', 'N/A')}s）")
-            logger.warning(f"  ⚠️ [诊断] 对于长时间SSE流，建议将timeout设置为300秒以上")
-        
-        logger.info("=" * 80)
-
-        if message_count > 100 and parsed_message_count < 5:
-            logger.error(f"严重: 收到 {message_count} 个chunk但只解析出 {parsed_message_count} 条消息，"
-                        f"解析率 {(parsed_message_count/message_count*100):.1f}%")
-            logger.debug(f"前10个chunk样本: {sample_chunks}")
+    async def _process_response(
+        self, response: aiohttp.ClientResponse, *, trace_id: str, question: str
+    ) -> AsyncGenerator[IMAMessage, None]:
+        """根据响应类型在入口选择 JSON 或 SSE，绝不回退重读。"""
+        content_type = response.headers.get("content-type", "").lower().split(";", 1)[0].strip()
+        if content_type == "text/event-stream":
+            async for message in self._process_sse_stream(
+                response, trace_id=trace_id, attempt_index=0, question=question
+            ):
+                yield message
+        elif content_type == "application/json":
+            data = await response.json()
+            if not isinstance(data, dict):
+                raise StreamParseError("JSON 响应必须为对象")
+            messages = self._extract_messages_from_response(data)
+            if messages and ("Code" in data or "code" in data):
+                messages.append(IMAMessage(
+                    type=MessageType.SYSTEM,
+                    content=str({"Code": data.get("Code", data.get("code"))}),
+                ))
+            if not messages:
+                message = self._parse_sse_message(json.dumps(data))
+                messages = [message] if message else []
+            for message in messages:
+                yield message
+        else:
+            raise StreamParseError(f"意外响应类型: {content_type}")
 
     def _extract_messages_from_response(self, response_data: Dict[str, Any]) -> List[IMAMessage]:
         """从完整响应中提取消息"""
@@ -980,22 +932,9 @@ class IMAAPIClient:
                 )
                 raise ValueError(f"HTTP {response.status}")
 
-            content_type = response.headers.get('content-type', '')
-            if 'text/event-stream' not in content_type:
-                response_text = await response.text()
-                try:
-                    error_data = json.loads(response_text)
-                    raise ValueError(f"API错误 (code: {error_data.get('code')}): {error_data.get('msg')}")
-                except json.JSONDecodeError:
-                    raise ValueError(f"意外响应类型: {content_type}")
-
-            # 处理流式响应
             message_count = 0
-            async for message in self._process_sse_stream(
-                response,
-                trace_id=trace_id,
-                attempt_index=0,
-                question=question
+            async for message in self._process_response(
+                response, trace_id=trace_id, question=question
             ):
                 message_count += 1
                 yield message
@@ -1063,92 +1002,114 @@ class IMAAPIClient:
         codes = self._collect_system_codes(messages)
         return bool(codes) and codes == [3]
 
+    @staticmethod
+    def _error_category(exc: BaseException) -> str:
+        if isinstance(exc, AuthenticationError):
+            return "authentication"
+        if isinstance(exc, asyncio.TimeoutError):
+            return "timeout"
+        if isinstance(exc, aiohttp.ClientPayloadError):
+            return "payload"
+        if isinstance(exc, aiohttp.ClientError):
+            return "network"
+        if isinstance(exc, (StreamParseError, json.JSONDecodeError, UnicodeError)):
+            return "parse"
+        return "response"
+
+    def _interrupted_result(self, messages: List[IMAMessage], exc: BaseException) -> AnswerResult:
+        partial = bool(self._extract_text_content(messages)) if messages else False
+        return AnswerResult(
+            status="partial" if partial else "failed",
+            messages=messages,
+            truncated=partial,
+            error_category=self._error_category(exc),
+            error="回答已截断，未完整接收" if partial else "未收到完整有效回答",
+        )
+
     async def ask_question_complete(
         self,
         question: str,
         timeout: Optional[float] = None,
         knowledge_base_id: Optional[str] = None,
-    ) -> List[IMAMessage]:
-        """获取完整的问题回答 - 支持自动重试"""
-        start_time = time.time()
+    ) -> AnswerResult:
+        """返回完整/部分/失败终态；仅在未收到回答的瞬态故障上重试。"""
+        deadline = time.monotonic() + timeout if timeout is not None else None
 
-        async def _attempt_request():
-            if timeout and (time.time() - start_time > timeout):
-                raise asyncio.TimeoutError("Total timeout exceeded")
+        async def within_deadline(awaitable):
+            if deadline is None:
+                return await awaitable
+            return await asyncio.wait_for(awaitable, max(0, deadline - time.monotonic()))
 
-            messages = []
-            # 每次尝试使用新的 session_id 以确保隔离
-            session_id = await self.init_session(knowledge_base_id=knowledge_base_id)
-            
-            gen = self.ask_question(question, session_id=session_id)
+        async def attempt_request() -> AnswerResult:
+            messages: List[IMAMessage] = []
+            gen = None
             try:
-                async for msg in gen:
-                    messages.append(msg)
-                    if timeout and (time.time() - start_time > timeout):
+                session_id = await within_deadline(self.init_session(knowledge_base_id=knowledge_base_id))
+                gen = self.ask_question(question, session_id=session_id)
+                while True:
+                    try:
+                        messages.append(await within_deadline(gen.__anext__()))
+                    except StopAsyncIteration:
                         break
+            except Exception as exc:
+                # 已交付的流片段不能与下一次请求拼接，也不能伪装成完整回答。
+                if any(msg.type == MessageType.TEXT and msg.content for msg in messages):
+                    return self._interrupted_result(messages, exc)
+                raise
             finally:
-                await gen.aclose()
-            
-            if not messages:
-                raise ValueError("未收到有效消息")
-            return messages
+                if gen is not None:
+                    await gen.aclose()
+
+            codes = self._collect_system_codes(messages)
+            if any(code != 0 for code in codes):
+                return AnswerResult(
+                    status="failed", messages=messages,
+                    error_category="api", error=f"IMA 返回错误码: {codes}",
+                )
+            if not any(msg.type == MessageType.TEXT and msg.content.strip() for msg in messages):
+                raise ValueError("未收到有效回答文本")
+            return AnswerResult(status="complete", messages=messages)
 
         async with self._ask_semaphore:
             try:
-                async def _attempt_request_with_retry() -> List[IMAMessage]:
+                async def request_with_retry() -> AnswerResult:
                     retryer = AsyncRetrying(
                         stop=stop_after_attempt(self.config.retry_count + 1),
                         wait=wait_exponential(multiplier=1, min=1, max=10),
-                        retry=retry_if_exception(self._should_retry_ask_exception),
+                        retry=retry_if_exception(
+                            lambda exc: (deadline is None or time.monotonic() < deadline)
+                            and self._should_retry_ask_exception(exc)
+                        ),
+                        sleep=lambda delay: within_deadline(asyncio.sleep(delay)),
                         before_sleep=before_sleep_log(logger, "WARNING"),
                         reraise=True,
                     )
-
                     async for attempt in retryer:
                         with attempt:
                             try:
-                                return await _attempt_request()
+                                return await attempt_request()
                             except AuthenticationError:
                                 raise
-                            except ValueError as e:
-                                if self._is_login_expired_error(str(e)):
-                                    logger.info("检测到登录失效，强制刷新 Token 并重试...")
-                                    refreshed = await self.refresh_token()
-                                    if not refreshed:
-                                        raise AuthenticationError(self._build_auth_error_message()) from e
+                            except ValueError as exc:
+                                if self._is_login_expired_error(str(exc)):
+                                    if not await within_deadline(self.refresh_token()):
+                                        raise AuthenticationError(self._build_auth_error_message()) from exc
+                                    return await attempt_request()
                                 raise
-
                     raise ValueError("问答重试耗尽")
 
-                base_backoff = 4.0
-                max_code3_retry = 2
-
-                for code3_retry_used in range(max_code3_retry + 1):
-                    messages = await _attempt_request_with_retry()
-                    if not self._is_code3_only_response(messages):
-                        return messages
-
-                    if code3_retry_used >= max_code3_retry:
-                        return messages
-
-                    delay = min(base_backoff * (2 ** code3_retry_used), 16.0) + random.uniform(0.2, 0.8)
-                    logger.warning(
-                        f"检测到 Code=3 且无文本响应，执行退避重试 (第{code3_retry_used + 1}/{max_code3_retry}次, sleep={delay:.1f}s)"
-                    )
-                    await asyncio.sleep(delay)
-
-                return [IMAMessage(type=MessageType.SYSTEM, content="请求失败: Code=3 重试后仍无有效文本", raw="code3_retry_exhausted")]
-
-            except Exception as e:
-                error_type = type(e).__name__
-                logger.error("问答失败", error_type=error_type, question_length=len(question))
-                return [
-                    IMAMessage(
-                        type=MessageType.SYSTEM,
-                        content=f"请求失败: {error_type}",
-                        raw=error_type,
-                    )
-                ]
+                for code3_retry_used in range(3):
+                    result = await request_with_retry()
+                    if result.status == "partial" or not self._is_code3_only_response(result.messages):
+                        return result
+                    if code3_retry_used >= 2:
+                        return result
+                    delay = min(4.0 * (2 ** code3_retry_used), 16.0) + random.uniform(0.2, 0.8)
+                    await within_deadline(asyncio.sleep(delay))
+                raise ValueError("Code=3 重试耗尽")
+            except Exception as exc:
+                logger.error("问答失败", error_type=type(exc).__name__, question_length=len(question))
+                return self._interrupted_result([], exc)
 
     def _extract_text_content(self, messages: List[IMAMessage]) -> str:
         """从消息列表中提取文本内容 - 仅提取文本类型的消息"""

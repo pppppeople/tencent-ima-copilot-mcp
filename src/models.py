@@ -2,7 +2,7 @@
 数据模型定义
 """
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, HttpUrl, field_serializer, ConfigDict
 from enum import Enum
 
@@ -71,6 +71,15 @@ class KnowledgeBaseMessage(IMAMessage):
 class TextMessage(IMAMessage):
     """文本消息模型"""
     text: str
+
+
+class AnswerResult(BaseModel):
+    """一次问答的终态；部分回答不可作为完整成功交付。"""
+    status: Literal["complete", "partial", "failed"]
+    messages: List[IMAMessage] = Field(default_factory=list)
+    truncated: bool = False
+    error_category: Optional[str] = None
+    error: Optional[str] = None
 
 
 class IMAResponse(BaseModel):
