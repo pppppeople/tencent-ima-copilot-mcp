@@ -28,6 +28,8 @@
 
 ### 方式一：使用 Docker（本仓库源码构建）
 
+Docker Run 和 Compose 均以 `127.0.0.1:8081:8081` 发布宿主端口，仅允许本机访问；容器内保持监听 `0.0.0.0:8081`，供端口转发使用。当前 MCP 端点没有调用方认证，需要跨主机使用时须另行设计认证与访问边界，不要直接改回全接口发布。
+
 #### 1. 使用 Docker Run
 
 ```bash
@@ -37,7 +39,7 @@ docker build -t ima-copilot-mcp:local .
 # 运行容器（需要替换以下三个必需的环境变量）
 docker run -d \
   --name ima-copilot-mcp \
-  -p 8081:8081 \
+  -p 127.0.0.1:8081:8081 \
   -e IMA_X_IMA_COOKIE="your_x_ima_cookie_here" \
   -e IMA_X_IMA_BKN="your_x_ima_bkn_here" \
   -e IMA_KNOWLEDGE_BASE_ID="your_knowledge_base_id" \
